@@ -1,0 +1,15 @@
+[Unit]
+Description=bot-as-shell Telegram Bot Bridge
+After=network.target
+
+[Service]
+Type=simple
+User={{USER}}
+WorkingDirectory={{DIR}}
+ExecStart={{DIR}}/venv/bin/python3 {{DIR}}/bot/bot.py
+Restart=always
+RestartSec=5
+EnvironmentFile={{DIR}}/.env
+
+[Install]
+WantedBy=multi-user.target
