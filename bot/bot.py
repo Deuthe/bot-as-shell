@@ -56,7 +56,8 @@ PERSONA = (
     "You manage a Linux server. "
     "Be concise and direct. Execute the needed commands rather than just suggesting them. "
     "Keep responses under 4000 characters. "
-    "Start every response with a brief one-line summary of what you did."
+    "Start every response with a brief one-line summary of what you did. "
+    "Do NOT prefix your response with '>' or any model name. Reply with just your answer, nothing else."
 )
 
 MAX_HISTORY = 5
@@ -269,7 +270,8 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 stdout, stderr = output_task.result()
                 response = (stdout.decode().strip() or stderr.decode().strip() or "No response.")
                 response = strip_ansi(response).strip()
-                log_event(chat_id, "RESPONSE", response[:1000])
+                response = re.sub(r'^> .+ · .+$', '', response, flags=re.MULTILINE).strip()
+                log_event(chat_id, "RESPONSE", response)
                 chat_history[chat_id].append((msg, response[:300]))
                 MAX = 4000
                 if len(response) > MAX:
