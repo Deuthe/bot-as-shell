@@ -1,8 +1,8 @@
 # bot-as-shell
 
-**Natural language server management over Telegram via opencode CLI.**
+**Manage your server over Telegram using opencode.**
 
-Send a Telegram message — the AI interprets it, runs the commands on your server, and replies with the result. Everything runs locally using opencode's built-in models. No API keys, no cloud costs, no data leaving your machine.
+Send a Telegram message, the AI figures out what to do, runs the commands on your server, and replies with the result. The model runs locally through opencode, but you need internet for Telegram to work.
 
 ## How it works
 
@@ -12,13 +12,13 @@ You -- Telegram --> bot.py -- opencode CLI -- AI model -- Linux shell
                    python-telegram-bot      Llama / big-pickle (local)
 ```
 
-The AI model runs on your own machine via opencode. It's free, offline, and private.
+The AI runs on your own machine via opencode, free and private. You just need internet so Telegram can deliver the messages.
 
 ## Prerequisites
 
 - Python 3.11+
-- [opencode CLI](https://opencode.ai) — `npm install -g @opencode/cli`
-- A Telegram bot token — create one free at [@BotFather](https://t.me/BotFather)
+- [opencode CLI](https://opencode.ai), install with `npm install -g @opencode/cli`
+- A Telegram bot token, get one free at [@BotFather](https://t.me/BotFather)
 
 ## Setup
 
@@ -38,11 +38,11 @@ chmod 600 .env
 
 ### Getting your Telegram credentials
 
-**Bot token:** Message [@BotFather](https://t.me/BotFather) on Telegram, send `/newbot`, pick a name and username — it replies with a token that looks like `123456:ABCdef...`.
+**Bot token:** Message [@BotFather](https://t.me/BotFather) on Telegram, send `/newbot`, pick a name and username. It replies with a token that looks like `123456:ABCdef...`.
 
 **Your chat ID:** There are a few ways:
-- Message [@userinfobot](https://t.me/userinfobot) — it replies with your numeric ID
-- Or message [@RawDataBot](https://t.me/RawDataBot) — look for `message.from.id`
+- Message [@userinfobot](https://t.me/userinfobot), it replies with your numeric ID
+- Or message [@RawDataBot](https://t.me/RawDataBot), look for `message.from.id`
 - Or after running the bot once, the chat ID appears in the logs under `bot/logs/`
 
 Edit `.env` with both values:
@@ -61,7 +61,7 @@ Message your bot on Telegram. That's it.
 
 ## Production (systemd)
 
-For 24/7 operation on a server:
+To keep it running 24/7 on a server:
 
 ```bash
 # Edit the service template with your user and project path
@@ -79,7 +79,7 @@ sudo systemctl enable --now bot-as-shell-bot
 | Telegram Bot API | Free |
 | Your server/electricity | Whatever you already pay |
 
-Zero API keys, zero cloud subscriptions. The model runs on your hardware.
+No API keys or cloud subscriptions. The model runs on your own machine.
 
 ## Commands
 
@@ -94,12 +94,12 @@ Zero API keys, zero cloud subscriptions. The model runs on your hardware.
 
 ## Other platforms
 
-The core concept — relay messages to opencode and return the output — works with any chat platform. The current implementation uses Telegram because it's simple, free, and has the best bot API.
+The same pattern works with any chat platform. This one uses Telegram because it's simple, free, and has a good bot API.
 
 A Discord version would follow the same pattern:
 
 ```python
-# Pseudocode — Discord version would look like:
+# Pseudocode, Discord version would look like:
 @bot.event
 async def on_message(message):
     prompt = build_prompt(message.author.id, message.content)
@@ -107,7 +107,7 @@ async def on_message(message):
     await message.channel.send(result)
 ```
 
-The platform-specific parts are just the connection boilerplate (`discord.py`, Slack SDK, Matrix, etc.) and the message routing — the opencode bridge stays identical.
+Only the connection boilerplate (`discord.py`, Slack SDK, Matrix, etc.) and message routing change. The opencode bridge stays the same.
 
 ## License
 
