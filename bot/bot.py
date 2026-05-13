@@ -66,6 +66,8 @@ SECURITY_URL = os.environ.get('SECURITY_URL', 'https://localhost:8901')
 SECURITY_PW = os.environ.get('SECURITY_PW', '')
 _SEC_TLS_CTX = None
 SEC_RUN_SH = os.environ.get('SEC_RUN_SH', os.path.join(_PROJECT_ROOT, 'security', 'run.sh'))
+CONFIRM_DESTRUCTIVE = os.environ.get('CONFIRM_DESTRUCTIVE', 'true').lower() == 'true'
+INJECTION_DEFENSE = os.environ.get('INJECTION_DEFENSE', 'true').lower() == 'true'
 
 PERSONA = (
     "You are a witty but professional server admin assistant. "
@@ -81,6 +83,46 @@ chat_history = {}
 personas = {}
 _camera_lock = asyncio.Lock()
 _whisper_model = None
+_active_process = {}
+_pending_confirmation = {}
+
+_DESTRUCTIVE_PATTERNS = [
+    r'\bdelete\s+all\b', r'\bremove\s+all\b', r'\bwipe\b',
+    r'\bformat\b', r'\bdestroy\b', r'\berase\s+everything\b',
+    r'\bnuke\b', r'\bshutdown\b', r'\breboot\b',
+    r'\breset\s+to\s+factory\b', r'\bclean\s+install\b',
+    r'\breinstall\s+os\b', r'\bkill\s+all\b',
+]
+_DESTRUCTIVE_RE = re.compile('|'.join(_DESTRUCTIVE_PATTERNS), re.IGNORECASE)
+
+_INJECTION_PATTERNS = [
+    r'ignore\s+(all\s+)?previous\s+(instructions|directions|commands)',
+    r'you\s+are\s+(now\s+)?(not\s+)?(required\s+to\s+)?(obey|follow|listen)',
+    r'forget\s+(everything|all\s+(previous|prior)\s+(instructions|prompts))',
+    r'system\s+(prompt|message|instruction)',
+    r'rewrite\s+(your\s+)?(system\s+)?prompt',
+    r'output\s+the\s+(system\s+)?prompt',
+    r'reveal\s+(your\s+)?(system\s+)?(prompts?|instructions?)',
+]
+_INJECTION_RE = re.compile('|'.join(_INJECTION_PATTERNS), re.IGNORECASE)
+
+_CONFIRM_TIMEOUT = 60
+_CONFIRM_MSG = (
+    "\u26a0\ufe0f That request involves potentially destructive operations.\n"
+    "Reply 'yes' to confirm, or anything else to cancel. "
+    f"(Pending confirmation expires in {_CONFIRM_TIMEOUT}s)"
+)
+
+
+def _is_destructive(text):
+    return bool(_DESTRUCTIVE_RE.search(text))
+
+
+def _detect_injection(text):
+    m = _INJECTION_RE.search(text)
+    if m:
+        return True, f"Prompt injection detected: '{m.group()}'"
+    return False, ""
 
 
 def _get_whisper():
@@ -88,9 +130,6 @@ def _get_whisper():
     if _whisper_model is None and _HAS_WHISPER:
         _whisper_model = WhisperModel("tiny", device="cpu", compute_type="int8")
     return _whisper_model
-
-
-_active_process = {}
 
 
 def authorized(chat_id):
@@ -107,9 +146,13 @@ def build_prompt(chat_id, new_msg):
     lines.append("[SYSTEM] Below is the conversation so far. Respond to the latest [USER] message.")
     history = chat_history.get(chat_id, [])
     for user, bot in history[-MAX_HISTORY:]:
-        lines.append(f"[USER] {user}")
+        lines.append("[USER] ---BEGIN USER MESSAGE---")
+        lines.append(user)
+        lines.append("---END USER MESSAGE---")
         lines.append(f"[ASSISTANT] {bot}")
-    lines.append(f"[USER] {new_msg}")
+    lines.append("[USER] ---BEGIN USER MESSAGE---")
+    lines.append(new_msg)
+    lines.append("---END USER MESSAGE---")
     return "\n".join(lines)
 
 
@@ -351,6 +394,30 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     msg = update.message.text.strip()
     if not msg:
         return
+
+    if chat_id in _pending_confirmation:
+        entry = _pending_confirmation.pop(chat_id)
+        if time.time() - entry["time"] > _CONFIRM_TIMEOUT:
+            await update.message.reply_text("Confirmation expired. Send your request again.")
+            return
+        if msg.lower() in ("yes", "y", "confirm", "do it", "proceed"):
+            await _execute_opencode(chat_id, entry["msg"], update, context)
+        else:
+            await update.message.reply_text("Cancelled.")
+        return
+
+    if INJECTION_DEFENSE:
+        injected, reason = _detect_injection(msg)
+        if injected:
+            log_event(chat_id, "INJECTION_BLOCKED", f"{reason}\nMessage: {msg}")
+            await update.message.reply_text(f"\u26a0\ufe0f {reason}\nRequest blocked.")
+            return
+
+    if CONFIRM_DESTRUCTIVE and _is_destructive(msg):
+        _pending_confirmation[chat_id] = {"msg": msg, "time": time.time()}
+        await update.message.reply_text(_CONFIRM_MSG)
+        return
+
     await _execute_opencode(chat_id, msg, update, context)
 
 

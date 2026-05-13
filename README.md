@@ -81,6 +81,16 @@ sudo systemctl enable --now bot-as-shell-bot
 
 No API keys or cloud subscriptions. The model runs on your own machine.
 
+## Safety
+
+The bot has two built-in safety features, both enabled by default (toggle via `.env`):
+
+**Destructive action confirmation** — If your message contains keywords like "delete all", "wipe", "format", "shutdown", etc., the bot asks for confirmation before executing. Reply `yes` to proceed. Pending confirmations expire after 60 seconds.
+
+**Prompt injection defense** — Messages that attempt to override the bot's system prompt (e.g. "ignore previous instructions") are blocked and logged. The AI cannot be tricked into abandoning its persona.
+
+Both features operate transparently — you won't notice them during normal use.
+
 ## Optional: Camera Security System
 
 This repo includes a `security/` directory with a camera motion detection system

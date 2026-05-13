@@ -27,6 +27,8 @@ just return errors, voice transcription requires `faster-whisper` (optional dep)
 | `PROCESS_TIMEOUT` | `600` | Max command execution time (seconds) |
 | `SECURITY_PW` | — | Password for security HTTP API |
 | `SECURITY_URL` | `https://localhost:8901` | Security API endpoint |
+| `CONFIRM_DESTRUCTIVE` | `true` | Ask confirmation before destructive operations |
+| `INJECTION_DEFENSE` | `true` | Block prompt injection attempts |
 
 ## Features
 
@@ -38,6 +40,8 @@ just return errors, voice transcription requires `faster-whisper` (optional dep)
 - Polling auto-restart on network errors
 - Subprocess timeout (600s) with partial output capture
 - Daily activity logs with 24h auto-cleanup
+- Destructive action confirmation (keyword-based guard before opencode)
+- Prompt injection defense (blocks system prompt override attempts)
 
 ## Bot commands
 
