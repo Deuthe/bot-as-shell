@@ -9,7 +9,7 @@ Send a Telegram message, the AI figures out what to do, runs the commands on you
 ```
 You -- Telegram --> bot.py -- opencode CLI -- AI model -- Linux shell
                          ↕                      ↕
-                   python-telegram-bot      Llama / big-pickle (local)
+                    python-telegram-bot      big-pickle (local)
 ```
 
 The AI runs on your own machine via opencode, free and private. You just need internet so Telegram can deliver the messages.
@@ -75,7 +75,7 @@ sudo systemctl enable --now bot-as-shell-bot
 | Component | Cost |
 |-----------|------|
 | opencode CLI | Free (MIT license) |
-| AI model (big-pickle / Llama) | Free, runs locally |
+| AI model (big-pickle) | Free, runs locally |
 | Telegram Bot API | Free |
 | Your server/electricity | Whatever you already pay |
 
