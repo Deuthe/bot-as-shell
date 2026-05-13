@@ -1,2 +1,4 @@
 python-telegram-bot>=22.0
 uvloop>=0.19; sys_platform != 'win32'
+# Optional: voice message transcription
+# faster-whisper>=1.0

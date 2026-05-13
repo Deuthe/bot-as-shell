@@ -1,5 +1,9 @@
 #!/usr/bin/env python3
-import asyncio, subprocess, re, os, glob, time, json, shutil
+# NOTE: The security/monitoring system (security/ directory) is an ISOLATED OPTIONAL
+# component. Most people only want the Telegram + opencode bot. The security module
+# (camera motion detection, alerting) is separate and can be deleted entirely if
+# not needed. Keep it or remove it — the bot works fine either way.
+import asyncio, subprocess, re, os, glob, time, json, shutil, ssl, base64, urllib.request
 from datetime import datetime
 from telegram import Update
 from telegram.ext import Application, CommandHandler, MessageHandler, filters, ContextTypes
@@ -10,12 +14,19 @@ try:
 except ImportError:
     pass
 
+try:
+    from faster_whisper import WhisperModel
+    _HAS_WHISPER = True
+except ImportError:
+    _HAS_WHISPER = False
+
 _SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 _PROJECT_ROOT = os.path.dirname(_SCRIPT_DIR)
 
 for _candidate in [
     os.path.join(_PROJECT_ROOT, '.env'),
     os.path.join(_SCRIPT_DIR, '.env'),
+    os.path.join(_PROJECT_ROOT, 'security', '.env'),
 ]:
     if os.path.exists(_candidate):
         with open(_candidate) as _f:
@@ -50,6 +61,11 @@ OPENCODE_BIN = _OPENCODE_ENV if os.path.isfile(_OPENCODE_ENV) else 'opencode'
 BOT_ENV = {**os.environ, "TERM": "dumb"}
 LOG_DIR = os.environ.get('LOG_DIR', os.path.join(_SCRIPT_DIR, 'logs'))
 PROCESS_TIMEOUT = int(os.environ.get('PROCESS_TIMEOUT', '600'))
+STATUS_INTERVAL = 30
+SECURITY_URL = os.environ.get('SECURITY_URL', 'https://localhost:8901')
+SECURITY_PW = os.environ.get('SECURITY_PW', '')
+_SEC_TLS_CTX = None
+SEC_RUN_SH = os.environ.get('SEC_RUN_SH', os.path.join(_PROJECT_ROOT, 'security', 'run.sh'))
 
 PERSONA = (
     "You are a witty but professional server admin assistant. "
@@ -63,6 +79,17 @@ PERSONA = (
 MAX_HISTORY = 5
 chat_history = {}
 personas = {}
+_camera_lock = asyncio.Lock()
+_whisper_model = None
+
+
+def _get_whisper():
+    global _whisper_model
+    if _whisper_model is None and _HAS_WHISPER:
+        _whisper_model = WhisperModel("tiny", device="cpu", compute_type="int8")
+    return _whisper_model
+
+
 _active_process = {}
 
 
@@ -106,6 +133,19 @@ def cleanup_logs():
             pass
 
 
+async def _send(update_or_msg, text, edit_msg=None):
+    text = text.strip() or "..."
+    MAX = 4000
+    chunks = [text[i:i+MAX] for i in range(0, len(text), MAX)]
+    if edit_msg:
+        await edit_msg.edit_text(chunks[0])
+        for chunk in chunks[1:]:
+            await update_or_msg.reply_text(chunk)
+    else:
+        for chunk in chunks:
+            await update_or_msg.reply_text(chunk)
+
+
 DOCS_TEXT = """
 *bot-as-shell — Full Documentation*
 
@@ -123,16 +163,23 @@ Each message is a *fresh opencode session* — the AI sees your current message 
 A system prompt gives the AI a consistent personality. Check with /persona, change with /persona <text>.
 
 *Commands*
-Just type what you want — the AI figures out the commands. Each message is independent.
+Just type what you want — the AI figures out the commands.
 /cancel — abort a running request
 /docs — this documentation
 /persona [text] — view or change AI personality
 /reset — clear conversation history
 /logs — view today's activity logs
+/pic — capture photo from camera
+/activatesecurity — arm camera motion detection
+/deactivatesecurity — disarm camera
+/securitystatus — check if security is active
 
 *Example commands*
 "check disk usage"  "who is online"  "update packages"
 "check system stats (cpu, ram, disk)"  "find large files"  "restart service X"
+
+*Voice*
+Send a voice message and the bot will transcribe it with Whisper and execute your command.
 """
 
 
@@ -150,7 +197,11 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "/persona — view or change my personality\n"
         "/reset — clear conversation history\n"
         "/cancel — cancel a running request\n"
-        "/logs — view today's activity logs\n\n"
+        "/logs — view today's activity logs\n"
+        "/pic — capture photo from camera\n"
+        "/activatesecurity — arm camera motion detection\n"
+        "/deactivatesecurity — disarm camera\n"
+        "/securitystatus — check if security is active\n\n"
         "If a request takes >3 min a status update will appear. "
         "Logs auto-delete after 24h."
     )
@@ -159,7 +210,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def docs(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not authorized(update.effective_chat.id):
         return
-    await update.message.reply_text(DOCS_TEXT.strip())
+    await update.message.reply_text(DOCS_TEXT.strip(), parse_mode="Markdown")
 
 
 async def persona(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -205,30 +256,7 @@ async def logs_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text(remaining[i:i+4000])
 
 
-async def cancel(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    chat_id = update.effective_chat.id
-    if not authorized(chat_id):
-        return
-    proc = _active_process.pop(chat_id, None)
-    if proc:
-        try:
-            proc.kill()
-        except Exception:
-            pass
-        await update.message.reply_text("Cancelled.")
-    else:
-        await update.message.reply_text("Nothing to cancel.")
-
-
-async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    chat_id = update.effective_chat.id
-    if not authorized(chat_id):
-        return
-
-    msg = update.message.text.strip()
-    if not msg:
-        return
-
+async def _execute_opencode(chat_id, msg, update, context, edit_msg=None):
     prev = _active_process.pop(chat_id, None)
     if prev:
         try:
@@ -253,7 +281,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     )
 
     async def get_output():
-        out, err = await proc.communicate()
+        out, err = await asyncio.wait_for(proc.communicate(), timeout=PROCESS_TIMEOUT)
         return out, err
 
     output_task = asyncio.create_task(get_output())
@@ -270,15 +298,12 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 stdout, stderr = output_task.result()
                 response = (stdout.decode().strip() or stderr.decode().strip() or "No response.")
                 response = strip_ansi(response).strip()
-                response = re.sub(r'^> .+ · .+$', '', response, flags=re.MULTILINE).strip()
+                response = re.sub(r'^> .+$', '', response, flags=re.MULTILINE).strip()
+                response = re.sub(r'(?m)^\s*\[.*?\]\s*$', '', response).strip()
+                response = re.sub(r'\n{3,}', '\n\n', response).strip()
                 log_event(chat_id, "RESPONSE", response)
                 chat_history[chat_id].append((msg, response[:300]))
-                MAX = 4000
-                if len(response) > MAX:
-                    for i in range(0, len(response), MAX):
-                        await update.message.reply_text(response[i:i+MAX])
-                else:
-                    await update.message.reply_text(response)
+                await _send(update.message, response, edit_msg=edit_msg)
                 return
 
             elapsed = time.time() - start_time
@@ -296,12 +321,16 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     msg_text += f"\n\nPartial output:\n{partial[:500]}"
                 else:
                     log_event(chat_id, "TIMEOUT", "No partial output")
-                await update.message.reply_text(msg_text)
+                await _send(update.message, msg_text, edit_msg=edit_msg)
                 chat_history[chat_id].append((msg, msg_text[:300]))
                 return
 
             if elapsed >= 180 and not notified:
-                await update.message.reply_text(f"Still working on your request... ({int(elapsed)}s)")
+                status = f"Still working on your request... ({int(elapsed)}s)"
+                if edit_msg:
+                    await edit_msg.edit_text(status)
+                else:
+                    await update.message.reply_text(status)
                 notified = True
 
             await context.bot.send_chat_action(chat_id=chat_id, action="typing")
@@ -315,7 +344,204 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         _active_process.pop(chat_id, None)
 
 
-def main():
+async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    chat_id = update.effective_chat.id
+    if not authorized(chat_id):
+        return
+    msg = update.message.text.strip()
+    if not msg:
+        return
+    await _execute_opencode(chat_id, msg, update, context)
+
+
+async def handle_voice(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    chat_id = update.effective_chat.id
+    if not authorized(chat_id):
+        return
+
+    voice = update.message.voice or update.message.audio
+    if not voice:
+        return
+
+    status = await update.message.reply_text("Transcribing voice message...")
+
+    file = await context.bot.get_file(voice.file_id)
+    ogg_path = f"/tmp/voice_{chat_id}_{int(time.time())}.ogg"
+    await file.download_to_drive(ogg_path)
+
+    try:
+        model = _get_whisper()
+        if model is None:
+            await status.edit_text("Whisper not installed — voice transcription unavailable.")
+            return
+        segments, _ = model.transcribe(ogg_path, beam_size=5)
+        text = " ".join(s.text for s in segments).strip()
+        if not text:
+            await status.edit_text("Could not transcribe that audio.")
+            return
+        await status.edit_text(f"Transcribed: _{text}_")
+        await _execute_opencode(chat_id, text, update, context, edit_msg=status)
+    finally:
+        try:
+            os.remove(ogg_path)
+        except OSError:
+            pass
+
+
+def _sec_request(path):
+    global _SEC_TLS_CTX
+    if _SEC_TLS_CTX is None:
+        _SEC_TLS_CTX = ssl.create_default_context()
+        _SEC_TLS_CTX.check_hostname = False
+        _SEC_TLS_CTX.verify_mode = ssl.CERT_NONE
+    auth = base64.b64encode(f":{SECURITY_PW}".encode()).decode()
+    req = urllib.request.Request(
+        f"{SECURITY_URL}{path}",
+        headers={"Authorization": f"Basic {auth}"}
+    )
+    try:
+        resp = urllib.request.urlopen(req, timeout=5, context=_SEC_TLS_CTX)
+        return resp.read().decode().strip()
+    except urllib.error.HTTPError as e:
+        return f"Error: {e.code} {e.read().decode().strip()}"
+    except Exception as e:
+        return f"Error: {e}"
+
+
+async def activatesecurity(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    chat_id = update.effective_chat.id
+    if not authorized(chat_id):
+        return
+    msg = await update.message.reply_text("Activating security...")
+    result = _sec_request("/activate")
+    await msg.edit_text(f"Security activated.\n{result}")
+
+
+async def deactivatesecurity(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    chat_id = update.effective_chat.id
+    if not authorized(chat_id):
+        return
+    msg = await update.message.reply_text("Deactivating security...")
+    result = _sec_request("/deactivate")
+    await msg.edit_text(f"Security deactivated.\n{result}")
+
+
+async def pic(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    chat_id = update.effective_chat.id
+    if not authorized(chat_id):
+        return
+    async with _camera_lock:
+        msg = await update.message.reply_text("Capturing from camera...")
+        tmp = f"/tmp/pic_{chat_id}_{int(time.time())}.jpg"
+        SERVICE = "security-monitor.service"
+        try:
+            stop_proc = await asyncio.create_subprocess_exec(
+                "sudo", "systemctl", "stop", SERVICE,
+                stdout=asyncio.subprocess.DEVNULL,
+                stderr=asyncio.subprocess.DEVNULL
+            )
+            await asyncio.wait_for(stop_proc.wait(), timeout=15)
+
+            for _ in range(10):
+                chk = await asyncio.create_subprocess_exec(
+                    "fuser", "/dev/video0",
+                    stdout=asyncio.subprocess.PIPE,
+                    stderr=asyncio.subprocess.PIPE
+                )
+                stdout, _ = await chk.communicate()
+                if not stdout.strip():
+                    break
+                kill_proc = await asyncio.create_subprocess_exec(
+                    "fuser", "-k", "/dev/video0",
+                    stdout=asyncio.subprocess.DEVNULL,
+                    stderr=asyncio.subprocess.DEVNULL
+                )
+                await kill_proc.wait()
+                await asyncio.sleep(0.5)
+
+            last_err = None
+            for attempt in range(3):
+                ff = await asyncio.create_subprocess_exec(
+                    "ffmpeg", "-y", "-f", "v4l2", "-i", "/dev/video0",
+                    "-vframes", "1", "-q:v", "2", "-update", "1", tmp,
+                    stdout=asyncio.subprocess.DEVNULL,
+                    stderr=asyncio.subprocess.DEVNULL
+                )
+                try:
+                    await asyncio.wait_for(ff.wait(), timeout=10)
+                except asyncio.TimeoutError:
+                    ff.kill()
+                    await ff.wait()
+                    last_err = "timeout"
+                    await asyncio.sleep(1)
+                    continue
+
+                if ff.returncode != 0:
+                    last_err = f"ffmpeg exited code {ff.returncode}"
+                    await asyncio.sleep(1)
+                    continue
+
+                if os.path.exists(tmp) and os.path.getsize(tmp) > 1000:
+                    with open(tmp, "rb") as f:
+                        await update.message.reply_photo(photo=f)
+                    await msg.delete()
+                    return
+                last_err = "file too small or missing"
+                await asyncio.sleep(1)
+
+            await msg.edit_text(f"Failed to capture image after 3 attempts ({last_err}).")
+        except Exception as e:
+            await msg.edit_text(f"Camera error: {e}")
+        finally:
+            try:
+                os.remove(tmp)
+            except OSError:
+                pass
+            asyncio.create_task(_restart_security())
+
+
+async def _restart_security():
+    await asyncio.sleep(3)
+    try:
+        proc = await asyncio.create_subprocess_exec(
+            "sudo", "systemctl", "start", "security-monitor.service",
+            stdout=asyncio.subprocess.DEVNULL,
+            stderr=asyncio.subprocess.DEVNULL
+        )
+        await asyncio.wait_for(proc.wait(), timeout=15)
+    except Exception:
+        pass
+
+
+async def cancel(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    chat_id = update.effective_chat.id
+    if not authorized(chat_id):
+        return
+    proc = _active_process.pop(chat_id, None)
+    if proc:
+        try:
+            proc.kill()
+        except Exception:
+            pass
+        await update.message.reply_text("Cancelled.")
+    else:
+        await update.message.reply_text("Nothing to cancel.")
+
+
+async def securitystatus(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    chat_id = update.effective_chat.id
+    if not authorized(chat_id):
+        return
+    result = _sec_request("/status")
+    try:
+        state = json.loads(result)
+        status = "ACTIVE" if state.get("active") else "INACTIVE"
+        await update.message.reply_text(f"Security Status: {status}")
+    except Exception:
+        await update.message.reply_text(f"Security status:\n{result}")
+
+
+def _build_app():
     app = Application.builder().token(TOKEN).build()
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CommandHandler("docs", docs))
@@ -323,9 +549,24 @@ def main():
     app.add_handler(CommandHandler("reset", reset))
     app.add_handler(CommandHandler("logs", logs_cmd))
     app.add_handler(CommandHandler("cancel", cancel))
+    app.add_handler(CommandHandler("pic", pic))
+    app.add_handler(CommandHandler("activatesecurity", activatesecurity))
+    app.add_handler(CommandHandler("deactivatesecurity", deactivatesecurity))
+    app.add_handler(CommandHandler("securitystatus", securitystatus))
+    app.add_handler(MessageHandler(filters.VOICE | filters.AUDIO, handle_voice))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
+    return app
+
+
+def main():
     print("Bot starting...")
-    app.run_polling(allowed_updates=Update.ALL_TYPES)
+    while True:
+        try:
+            app = _build_app()
+            app.run_polling(allowed_updates=Update.ALL_TYPES)
+        except Exception as exc:
+            print(f"Polling error: {exc}. Restarting in 5s...")
+            time.sleep(5)
 
 
 if __name__ == "__main__":

@@ -1,0 +1,18 @@
+[Unit]
+Description=Security Command Server
+After=network.target
+
+[Service]
+Type=simple
+User={{USER}}
+Group={{USER}}
+SupplementaryGroups=video audio
+WorkingDirectory={{DIR}}/security
+EnvironmentFile={{DIR}}/security/.env
+ExecStartPre=/bin/bash -c 'kill $(lsof -ti :8901) 2>/dev/null; exit 0'
+ExecStart=/usr/bin/python3 {{DIR}}/security/server.py
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target

@@ -81,6 +81,15 @@ sudo systemctl enable --now bot-as-shell-bot
 
 No API keys or cloud subscriptions. The model runs on your own machine.
 
+## Optional: Camera Security System
+
+This repo includes a `security/` directory with a camera motion detection system
+(OpenCV, HTTP command server, multi-channel alerting). It is **isolated and optional**.
+The bot works perfectly without it — security commands like `/activatesecurity` just
+return errors if the security server isn't running.
+
+Delete the `security/` directory if you don't need it. No code changes required.
+
 ## Commands
 
 | What you send | What happens |
@@ -91,6 +100,10 @@ No API keys or cloud subscriptions. The model runs on your own machine.
 | `/reset` | Clear conversation history |
 | `/cancel` | Abort a running request |
 | `/logs` | View today's activity |
+| `/pic` | Capture photo from USB camera (requires security module) |
+| `/activatesecurity` | Arm camera motion detection (requires security module) |
+| `/deactivatesecurity` | Disarm camera (requires security module) |
+| `/securitystatus` | Check if security is active (requires security module) |
 
 ## Other platforms
 

@@ -1,0 +1,17 @@
+[Unit]
+Description=Security Camera Monitor
+After=network.target
+
+[Service]
+Type=simple
+User={{USER}}
+Group={{USER}}
+SupplementaryGroups=video audio
+WorkingDirectory={{DIR}}/security
+EnvironmentFile={{DIR}}/security/.env
+ExecStart=/usr/bin/python3 -u {{DIR}}/security/monitor.py
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target
