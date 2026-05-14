@@ -12,3 +12,4 @@ captures/
 .state
 .server_pid
 .monitor_pid
+monitoring/prometheus/data/

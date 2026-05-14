@@ -1,0 +1,13 @@
+[Unit]
+Description=Bot Metrics Exporter for Prometheus
+After=network.target
+
+[Service]
+Type=simple
+User={{USER}}
+ExecStart={{DIR}}/monitoring/bot_exporter.py
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=default.target

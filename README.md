@@ -91,6 +91,20 @@ The bot has two built-in safety features, both enabled by default (toggle via `.
 
 Both features operate transparently — you won't notice them during normal use.
 
+## Optional: Monitoring Stack (Prometheus + Grafana)
+
+The `monitoring/` directory contains a complete observability stack:
+
+- **node_exporter** — system metrics (CPU, RAM, disk, network) on port 9100
+- **bot_exporter** — bot & service health metrics on port 9101
+- **Prometheus** — metrics store with alert rules (BotDown, NodeDown, DiskSpaceLow)
+- **Alertmanager** — alert routing to Telegram via webhook
+- **Grafana** — dashboards on port 3000 (Prometheus datasource pre-configured)
+
+All services bind to `127.0.0.1` only — access Grafana via SSH tunnel.
+
+Templates in `systemd/` use `{{USER}}` / `{{DIR}}` placeholders. Full install guide at `docs/monitoring.md`.
+
 ## Optional: Camera Security System
 
 This repo includes a `security/` directory with a camera motion detection system

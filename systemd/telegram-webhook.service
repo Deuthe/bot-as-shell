@@ -1,0 +1,13 @@
+[Unit]
+Description=Telegram Alert Webhook Receiver
+After=network.target
+
+[Service]
+Type=simple
+User={{USER}}
+ExecStart={{DIR}}/monitoring/telegram_webhook.py
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=default.target
