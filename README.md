@@ -101,9 +101,7 @@ The `monitoring/` directory contains a complete observability stack:
 - **Alertmanager** — alert routing to Telegram via webhook
 - **Grafana** — dashboards on port 3000 (Prometheus datasource pre-configured)
 
-All services bind to `127.0.0.1` only — access Grafana via SSH tunnel.
-
-Templates in `systemd/` use `{{USER}}` / `{{DIR}}` placeholders. Full install guide at `docs/monitoring.md`.
+All services bind to `127.0.0.1` only — access Grafana via SSH tunnel or Tailscale. Systemd templates in `systemd/` use `{{USER}}` / `{{DIR}}` placeholders.
 
 ## Optional: Camera Security System
 
