@@ -1,0 +1,304 @@
+{
+  "title": "NUC Overview",
+  "tags": [
+    "nuc"
+  ],
+  "timezone": "browser",
+  "schemaVersion": 40,
+  "time": {
+    "from": "now-6h",
+    "to": "now"
+  },
+  "refresh": "30s",
+  "panels": [
+    {
+      "id": 1,
+      "title": "CPU Load",
+      "type": "graph",
+      "description": "System load average over 1 minute.",
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 0
+      },
+      "targets": [
+        {
+          "expr": "node_load1",
+          "refId": "A"
+        }
+      ],
+      "lines": true,
+      "fill": 1,
+      "linewidth": 2,
+      "points": false,
+      "bars": false,
+      "legend": {
+        "displayMode": "hidden"
+      }
+    },
+    {
+      "id": 2,
+      "title": "Memory Used",
+      "type": "graph",
+      "description": "Total memory minus available (available = free + reclaimable cache).",
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 12,
+        "y": 0
+      },
+      "targets": [
+        {
+          "expr": "node_memory_MemTotal_bytes - node_memory_MemAvailable_bytes",
+          "refId": "A"
+        }
+      ],
+      "lines": true,
+      "fill": 1,
+      "linewidth": 2,
+      "points": false,
+      "bars": false,
+      "legend": {
+        "displayMode": "hidden"
+      },
+      "yaxes": [
+        {
+          "format": "bytes"
+        },
+        {
+          "format": "short"
+        }
+      ]
+    },
+    {
+      "id": 3,
+      "title": "CPU Utilization",
+      "type": "graph",
+      "description": "CPU time breakdown by mode. Stacked = total CPU usage (100% = all cores maxed).",
+      "gridPos": {
+        "h": 7,
+        "w": 8,
+        "x": 0,
+        "y": 8
+      },
+      "targets": [
+        {
+          "expr": "avg(rate(node_cpu_seconds_total{mode=\"user\"}[5m])) * 100",
+          "legendFormat": "User",
+          "refId": "A"
+        },
+        {
+          "expr": "avg(rate(node_cpu_seconds_total{mode=\"system\"}[5m])) * 100",
+          "legendFormat": "System",
+          "refId": "B"
+        },
+        {
+          "expr": "avg(rate(node_cpu_seconds_total{mode=\"iowait\"}[5m])) * 100",
+          "legendFormat": "I/O Wait",
+          "refId": "C"
+        },
+        {
+          "expr": "avg(rate(node_cpu_seconds_total{mode=\"softirq\"}[5m])) * 100",
+          "legendFormat": "SoftIRQ",
+          "refId": "D"
+        },
+        {
+          "expr": "avg(rate(node_cpu_seconds_total{mode=\"irq\"}[5m])) * 100",
+          "legendFormat": "IRQ",
+          "refId": "E"
+        }
+      ],
+      "lines": true,
+      "fill": 1,
+      "linewidth": 1,
+      "points": false,
+      "bars": false,
+      "stack": true,
+      "legend": {
+        "displayMode": "table",
+        "placement": "bottom"
+      },
+      "yaxes": [
+        {
+          "format": "percent",
+          "max": 100,
+          "min": 0
+        },
+        {
+          "format": "short"
+        }
+      ]
+    },
+    {
+      "id": 4,
+      "title": "Memory Breakdown",
+      "type": "graph",
+      "description": "How RAM is allocated: used by processes, file cache (reclaimable), buffers, free.",
+      "gridPos": {
+        "h": 7,
+        "w": 8,
+        "x": 8,
+        "y": 8
+      },
+      "targets": [
+        {
+          "expr": "node_memory_MemTotal_bytes - node_memory_MemAvailable_bytes",
+          "legendFormat": "Used",
+          "refId": "A"
+        },
+        {
+          "expr": "node_memory_Cached_bytes",
+          "legendFormat": "Cached",
+          "refId": "B"
+        },
+        {
+          "expr": "node_memory_Buffers_bytes",
+          "legendFormat": "Buffers",
+          "refId": "C"
+        },
+        {
+          "expr": "node_memory_MemFree_bytes",
+          "legendFormat": "Free",
+          "refId": "D"
+        }
+      ],
+      "lines": true,
+      "fill": 1,
+      "linewidth": 1,
+      "points": false,
+      "bars": false,
+      "stack": true,
+      "legend": {
+        "displayMode": "table",
+        "placement": "bottom"
+      },
+      "yaxes": [
+        {
+          "format": "bytes"
+        },
+        {
+          "format": "short"
+        }
+      ]
+    },
+    {
+      "id": 5,
+      "title": "Network Traffic",
+      "type": "graph",
+      "description": "Bandwidth per interface (excluding loopback). RX = receive, TX = transmit.",
+      "gridPos": {
+        "h": 7,
+        "w": 8,
+        "x": 16,
+        "y": 8
+      },
+      "targets": [
+        {
+          "expr": "rate(node_network_receive_bytes_total{device!=\"lo\"}[5m])",
+          "legendFormat": "{{device}} RX",
+          "refId": "A"
+        },
+        {
+          "expr": "rate(node_network_transmit_bytes_total{device!=\"lo\"}[5m])",
+          "legendFormat": "{{device}} TX",
+          "refId": "B"
+        }
+      ],
+      "lines": true,
+      "fill": 1,
+      "linewidth": 1,
+      "points": false,
+      "bars": false,
+      "legend": {
+        "displayMode": "table",
+        "placement": "bottom"
+      },
+      "yaxes": [
+        {
+          "format": "Bps"
+        },
+        {
+          "format": "short"
+        }
+      ]
+    },
+    {
+      "id": 6,
+      "title": "Services",
+      "type": "table",
+      "description": "Individual service status. Add more by extending the list in bot_exporter.py.",
+      "gridPos": {
+        "h": 6,
+        "w": 4,
+        "x": 8,
+        "y": 15
+      },
+      "targets": [
+        {
+          "expr": "service_up",
+          "refId": "A",
+          "format": "table",
+          "instant": true,
+          "legendFormat": ""
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "mappings": [
+            {
+              "type": "value",
+              "options": {
+                "1": {
+                  "text": "\u2705 Active",
+                  "color": "green"
+                }
+              },
+              "value": "1"
+            },
+            {
+              "type": "value",
+              "options": {
+                "0": {
+                  "text": "\u274c Down",
+                  "color": "red"
+                }
+              },
+              "value": "0"
+            }
+          ],
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "red",
+                "value": null
+              },
+              {
+                "color": "green",
+                "value": 0.5
+              }
+            ]
+          }
+        },
+        "overrides": []
+      },
+      "transformations": [
+        {
+          "id": "organize",
+          "options": {
+            "excludeByName": {
+              "Time": true,
+              "__name__": true
+            },
+            "indexByName": {},
+            "renameByName": {
+              "service": "Service",
+              "Value": "Status"
+            }
+          }
+        }
+      ]
+    }
+  ]
+}

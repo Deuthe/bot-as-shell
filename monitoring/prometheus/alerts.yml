@@ -1,0 +1,28 @@
+groups:
+  - name: bot
+    rules:
+      - alert: BotDown
+        expr: up{job="bot"} == 0
+        for: 30s
+        labels:
+          severity: critical
+        annotations:
+          summary: "Bot is down"
+
+      - alert: NodeDown
+        expr: up{job="node"} == 0
+        for: 30s
+        labels:
+          severity: critical
+        annotations:
+          summary: "Node exporter is down"
+
+  - name: disk
+    rules:
+      - alert: DiskSpaceLow
+        expr: (1 - (node_filesystem_avail_bytes{mountpoint="/"} / node_filesystem_size_bytes{mountpoint="/"})) * 100 > 85
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Disk usage > 85%"

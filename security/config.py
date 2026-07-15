@@ -13,6 +13,19 @@ def load_dotenv(path=None):
                     os.environ.setdefault(key.strip(), val.strip())
 
 
+def _read_cred(name):
+    cred_dir = os.environ.get('CREDENTIALS_DIRECTORY')
+    if cred_dir:
+        path = os.path.join(cred_dir, name)
+        if os.path.isfile(path):
+            with open(path) as f:
+                return f.read().strip()
+    return None
+
+_cred_token = _read_cred('bot-token')
+if _cred_token is not None:
+    os.environ['TELEGRAM_BOT_TOKEN'] = _cred_token
+
 load_dotenv()
 
 CONFIG = {

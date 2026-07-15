@@ -3,8 +3,8 @@
 import json, os, sys
 from http.server import HTTPServer, BaseHTTPRequestHandler
 
-CHAT_ID = "your_chat_id"
-TOKEN_FILE = "/path/to/.env"
+CHAT_ID = os.environ.get("TELEGRAM_CHAT_ID", "your_chat_id")
+TOKEN_FILE = os.environ.get("TELEGRAM_TOKEN_FILE", os.path.join(os.path.dirname(os.path.abspath(__file__)), '..', '.env'))
 
 token = ""
 if os.path.exists(TOKEN_FILE):

@@ -2,8 +2,8 @@
 # NOTE: The security/monitoring system (security/ directory) is an ISOLATED OPTIONAL
 # component. Most people only want the Telegram + opencode bot. The security module
 # (camera motion detection, alerting) is separate and can be deleted entirely if
-# not needed. Keep it or remove it — the bot works fine either way.
-import asyncio, subprocess, re, os, glob, time, json, shutil, ssl, base64, urllib.request
+# not needed. Keep it or remove it — the bot works either way.
+import asyncio, subprocess, re, os, glob, time, json, shutil, ssl, base64, urllib.request, sqlite3
 from datetime import datetime
 from telegram import Update
 from telegram.ext import Application, CommandHandler, MessageHandler, filters, ContextTypes
@@ -65,26 +65,62 @@ STATUS_INTERVAL = 30
 SECURITY_URL = os.environ.get('SECURITY_URL', 'https://localhost:8901')
 SECURITY_PW = os.environ.get('SECURITY_PW', '')
 _SEC_TLS_CTX = None
-SEC_RUN_SH = os.environ.get('SEC_RUN_SH', os.path.join(_PROJECT_ROOT, 'security', 'run.sh'))
 CONFIRM_DESTRUCTIVE = os.environ.get('CONFIRM_DESTRUCTIVE', 'true').lower() == 'true'
 INJECTION_DEFENSE = os.environ.get('INJECTION_DEFENSE', 'true').lower() == 'true'
+
+_SSH_MONITOR_STATE = os.path.join(_SCRIPT_DIR, '.ssh_monitor.state')
+_SSH_MONITOR_LOG = os.environ.get('SSH_MONITOR_LOG', '/var/log/auth.log')
+_SSH_EVENT_PATTERNS = [
+    (re.compile(r'sshd\[\d+\]:\s*(?:Failed password for (?:invalid user )?|Invalid user )(\S+) from (\S+)'), 'ssh'),
+    (re.compile(r'sudo[\[:].*authentication failure'), 'sudo'),
+    (re.compile(r'(?<!sudo)su\[\d+\]:.*(?:FAILED SU|authentication failure)'), 'su'),
+    (re.compile(r'(?:useradd\[\d+\]:\s*new user|new user:)'), 'new_user'),
+]
 
 PERSONA = (
     "You are a witty but professional server admin assistant. "
     "You manage a Linux server. "
-    "Be concise and direct. Execute the needed commands rather than just suggesting them. "
-    "Keep responses under 4000 characters. "
-    "Start every response with a brief one-line summary of what you did. "
-    "Do NOT prefix your response with '>' or any model name. Reply with just your answer, nothing else."
+    "Be concise and direct. Follow these guidelines:\n"
+    "1. Think before coding — state assumptions, surface tradeoffs, ask if uncertain.\n"
+    "2. Simplicity first — minimum code that solves the problem, nothing speculative.\n"
+    "3. Surgical changes — touch only what you must, match existing style.\n"
+    "4. Goal-driven execution — define success criteria, loop until verified.\n"
+    "5. Start every response with a brief one-line summary of what you did, "
+    "then include results. "
+    "Do NOT prefix your response with '>' or any model name. Reply with just your answer, "
+    "keep responses under 4000 characters."
+)
+
+PLAN_SUFFIX = (
+    "You are in PLAN MODE. DO NOT execute any commands or take any actions. "
+    "Present a step-by-step plan for what you would do. "
+    "End by asking the user if they want to proceed with the plan."
+)
+BUILD_SUFFIX = (
+    "You are in BUILD MODE. Execute requested actions directly."
 )
 
 MAX_HISTORY = 5
 chat_history = {}
 personas = {}
+chat_modes = {}
 _camera_lock = asyncio.Lock()
 _whisper_model = None
 _active_process = {}
 _pending_confirmation = {}
+_COUNTER_FILE = os.path.join(_SCRIPT_DIR, ".counter")
+
+def _inc_counter():
+    c = 0
+    try:
+        if os.path.exists(_COUNTER_FILE):
+            with open(_COUNTER_FILE) as f:
+                c = int(f.read().strip() or '0')
+        c += 1
+        with open(_COUNTER_FILE, 'w') as f:
+            f.write(str(c))
+    except Exception:
+        pass
 
 _DESTRUCTIVE_PATTERNS = [
     r'\bdelete\s+all\b', r'\bremove\s+all\b', r'\bwipe\b',
@@ -113,10 +149,8 @@ _CONFIRM_MSG = (
     f"(Pending confirmation expires in {_CONFIRM_TIMEOUT}s)"
 )
 
-
 def _is_destructive(text):
     return bool(_DESTRUCTIVE_RE.search(text))
-
 
 def _detect_injection(text):
     m = _INJECTION_RE.search(text)
@@ -124,57 +158,75 @@ def _detect_injection(text):
         return True, f"Prompt injection detected: '{m.group()}'"
     return False, ""
 
-
 def _get_whisper():
     global _whisper_model
     if _whisper_model is None and _HAS_WHISPER:
         _whisper_model = WhisperModel("tiny", device="cpu", compute_type="int8")
     return _whisper_model
 
+_COMMAND_ALIASES = {}
+
+def _register_command(name, handler, *aliases):
+    _COMMAND_ALIASES[name] = handler
+    for a in aliases:
+        _COMMAND_ALIASES[a] = handler
+
+def _match_command(text):
+    text = text.strip().lower()
+    if text.startswith("/"):
+        text = text[1:]
+    return _COMMAND_ALIASES.get(text)
 
 def authorized(chat_id):
     return chat_id == ALLOWED_CHAT_ID
 
-
 def strip_ansi(text):
     return re.compile(r'\x1B\[[0-?]*[ -/]*[@-~]').sub('', text)
 
+def _clean_response(text):
+    text = strip_ansi(text).strip()
+    if not text:
+        return None
+    text = re.sub(r'^> .+$', '', text, flags=re.MULTILINE)
+    text = re.sub(r'(?m)^\s*\[.*?\]\s*$', '', text)
+    text = re.sub(r'^✱ .+$', '', text, flags=re.MULTILINE)
+    text = re.sub(r'^\$ .+$', '', text, flags=re.MULTILINE)
+    text = re.sub(r'^→ .+$', '', text, flags=re.MULTILINE)
+    text = re.sub(r'^─+$', '', text, flags=re.MULTILINE)
+    text = re.sub(r'\n{3,}', '\n\n', text)
+    text = text.strip()
+    return text or None
 
-def build_prompt(chat_id, new_msg):
-    persona = personas.get(chat_id, PERSONA)
-    lines = [f"[SYSTEM] {persona}"]
-    lines.append("[SYSTEM] Below is the conversation so far. Respond to the latest [USER] message.")
-    history = chat_history.get(chat_id, [])
-    for user, bot in history[-MAX_HISTORY:]:
-        lines.append("[USER] ---BEGIN USER MESSAGE---")
-        lines.append(user)
-        lines.append("---END USER MESSAGE---")
-        lines.append(f"[ASSISTANT] {bot}")
-    lines.append("[USER] ---BEGIN USER MESSAGE---")
-    lines.append(new_msg)
-    lines.append("---END USER MESSAGE---")
-    return "\n".join(lines)
+_DB_PATH = os.environ.get('OPENCODE_DB_PATH', os.path.expanduser('~/.local/share/opencode/opencode.db'))
 
-
-def log_event(chat_id, event_type, content):
-    os.makedirs(LOG_DIR, exist_ok=True)
-    now = datetime.now()
-    logfile = os.path.join(LOG_DIR, now.strftime("%Y-%m-%d") + ".log")
-    timestamp = now.strftime("%Y-%m-%d %H:%M:%S")
-    entry = f"[{timestamp}] [{chat_id}] [{event_type}]\n{content}\n\n"
-    with open(logfile, "a") as f:
-        f.write(entry)
-
-
-def cleanup_logs():
-    now = time.time()
-    for f in glob.glob(os.path.join(LOG_DIR, "*.log")):
-        try:
-            if os.path.getmtime(f) < now - 86400:
-                os.remove(f)
-        except OSError:
-            pass
-
+def _query_opencode_db():
+    if not os.path.isfile(_DB_PATH):
+        return None
+    try:
+        conn = sqlite3.connect(_DB_PATH)
+        cursor = conn.cursor()
+        cursor.execute("SELECT id FROM session ORDER BY time_created DESC LIMIT 1")
+        row = cursor.fetchone()
+        if not row:
+            conn.close()
+            return None
+        cursor.execute("""
+            SELECT p.data
+            FROM part p
+            JOIN message m ON p.message_id = m.id
+            WHERE m.session_id = ?
+              AND json_extract(p.data, '$.type') = 'text'
+              AND json_extract(m.data, '$.role') = 'assistant'
+              AND json_extract(p.data, '$.text') IS NOT NULL
+              AND json_extract(p.data, '$.text') != ''
+            ORDER BY p.rowid ASC
+        """, (row[0],))
+        rows = cursor.fetchall()
+        conn.close()
+        texts = [json.loads(r[0])["text"] for r in rows]
+        return "\n".join(texts) if texts else None
+    except Exception:
+        return None
 
 async def _send(update_or_msg, text, edit_msg=None):
     text = text.strip() or "..."
@@ -188,6 +240,42 @@ async def _send(update_or_msg, text, edit_msg=None):
         for chunk in chunks:
             await update_or_msg.reply_text(chunk)
 
+def build_prompt(chat_id, new_msg):
+    persona = personas.get(chat_id, PERSONA)
+    mode = chat_modes.get(chat_id, "build")
+    if mode == "plan":
+        persona = persona + " " + PLAN_SUFFIX
+    lines = [f"[SYSTEM] {persona}"]
+    lines.append("[SYSTEM] Below is the conversation so far. Respond to the latest [USER] message.")
+    history = chat_history.get(chat_id, [])
+    for user, bot in history[-MAX_HISTORY:]:
+        lines.append("[USER] ---BEGIN USER MESSAGE---")
+        lines.append(user)
+        lines.append("---END USER MESSAGE---")
+        lines.append(f"[ASSISTANT] {bot}")
+    if not (history and history[-1][0] == new_msg):
+        lines.append("[USER] ---BEGIN USER MESSAGE---")
+        lines.append(new_msg)
+        lines.append("---END USER MESSAGE---")
+    return "\n".join(lines)
+
+def log_event(chat_id, event_type, content):
+    os.makedirs(LOG_DIR, exist_ok=True)
+    now = datetime.now()
+    logfile = os.path.join(LOG_DIR, now.strftime("%Y-%m-%d") + ".log")
+    timestamp = now.strftime("%Y-%m-%d %H:%M:%S")
+    entry = f"[{timestamp}] [{chat_id}] [{event_type}]\n{content}\n\n"
+    with open(logfile, "a") as f:
+        f.write(entry)
+
+def cleanup_logs():
+    now = time.time()
+    for f in glob.glob(os.path.join(LOG_DIR, "*.log")):
+        try:
+            if os.path.getmtime(f) < now - 86400:
+                os.remove(f)
+        except OSError:
+            pass
 
 DOCS_TEXT = """
 *bot-as-shell — Full Documentation*
@@ -216,6 +304,9 @@ Just type what you want — the AI figures out the commands.
 /activatesecurity — arm camera motion detection
 /deactivatesecurity — disarm camera
 /securitystatus — check if security is active
+/plan — switch to plan mode (present plan, ask approval)
+/build — switch to build mode (execute directly)
+/mode — show current mode
 
 *Example commands*
 "check disk usage"  "who is online"  "update packages"
@@ -223,8 +314,10 @@ Just type what you want — the AI figures out the commands.
 
 *Voice*
 Send a voice message and the bot will transcribe it with Whisper and execute your command.
-"""
 
+*SSH Monitor*
+The bot tails /var/log/auth.log and alerts you on failed SSH, sudo, and su attempts.
+"""
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     chat_id = update.effective_chat.id
@@ -244,17 +337,18 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "/pic — capture photo from camera\n"
         "/activatesecurity — arm camera motion detection\n"
         "/deactivatesecurity — disarm camera\n"
-        "/securitystatus — check if security is active\n\n"
+        "/securitystatus — check if security is active\n"
+        "/plan — plan mode (present plan, ask approval)\n"
+        "/build — build mode (execute directly)\n"
+        "/mode — show current mode\n\n"
         "If a request takes >3 min a status update will appear. "
         "Logs auto-delete after 24h."
     )
-
 
 async def docs(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not authorized(update.effective_chat.id):
         return
     await update.message.reply_text(DOCS_TEXT.strip(), parse_mode="Markdown")
-
 
 async def persona(update: Update, context: ContextTypes.DEFAULT_TYPE):
     chat_id = update.effective_chat.id
@@ -270,14 +364,12 @@ async def persona(update: Update, context: ContextTypes.DEFAULT_TYPE):
         current = personas.get(chat_id, PERSONA)
         await update.message.reply_text(f"Current personality:\n\n{current}\n\nTo change: /persona <new instructions>")
 
-
 async def reset(update: Update, context: ContextTypes.DEFAULT_TYPE):
     chat_id = update.effective_chat.id
     if not authorized(chat_id):
         return
     chat_history[chat_id] = []
     await update.message.reply_text("Conversation history cleared.")
-
 
 async def logs_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     chat_id = update.effective_chat.id
@@ -297,7 +389,6 @@ async def logs_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     remaining = header + content
     for i in range(0, len(remaining), 4000):
         await update.message.reply_text(remaining[i:i+4000])
-
 
 async def _execute_opencode(chat_id, msg, update, context, edit_msg=None):
     prev = _active_process.pop(chat_id, None)
@@ -332,20 +423,36 @@ async def _execute_opencode(chat_id, msg, update, context, edit_msg=None):
     await context.bot.send_chat_action(chat_id=chat_id, action="typing")
 
     start_time = time.time()
-    notified = False
+    notify_idx = 0
+    notify_times = [180, 300, 420, 540]
+
+    def _history_response(response):
+        if chat_history.get(chat_id) and chat_history[chat_id][-1][0] == msg:
+            chat_history[chat_id][-1] = (msg, response[:2000])
 
     try:
         while True:
             done, _ = await asyncio.wait([output_task], timeout=10)
             if output_task in done:
-                stdout, stderr = output_task.result()
-                response = (stdout.decode().strip() or stderr.decode().strip() or "No response.")
-                response = strip_ansi(response).strip()
-                response = re.sub(r'^> .+$', '', response, flags=re.MULTILINE).strip()
-                response = re.sub(r'(?m)^\s*\[.*?\]\s*$', '', response).strip()
-                response = re.sub(r'\n{3,}', '\n\n', response).strip()
+                try:
+                    stdout, stderr = output_task.result()
+                except asyncio.TimeoutError:
+                    msg_text = "Request timed out. Check /logs for details."
+                    log_event(chat_id, "TIMEOUT", "No partial output")
+                    await _send(update.message, msg_text, edit_msg=edit_msg)
+                    chat_history[chat_id].append((msg, msg_text[:300]))
+                    return
+                except Exception:
+                    msg_text = "An unexpected error occurred while processing your request."
+                    log_event(chat_id, "ERROR", str(output_task.exception())[:1000])
+                    await _send(update.message, msg_text, edit_msg=edit_msg)
+                    chat_history[chat_id].append((msg, msg_text[:300]))
+                    return
+
+                raw = stdout.decode().strip() or stderr.decode().strip()
+                response = _query_opencode_db() or _clean_response(raw) or "Done."
                 log_event(chat_id, "RESPONSE", response)
-                chat_history[chat_id].append((msg, response[:300]))
+                _history_response(response)
                 await _send(update.message, response, edit_msg=edit_msg)
                 return
 
@@ -354,8 +461,8 @@ async def _execute_opencode(chat_id, msg, update, context, edit_msg=None):
                 proc.kill()
                 try:
                     stdout, stderr = await output_task
-                    partial = (stdout.decode().strip() or stderr.decode().strip() or "")
-                    partial = strip_ansi(partial).strip()
+                    raw = stdout.decode().strip() or stderr.decode().strip()
+                    partial = _clean_response(raw) or ""
                 except Exception:
                     partial = ""
                 msg_text = "Request timed out. Check /logs for details."
@@ -368,13 +475,13 @@ async def _execute_opencode(chat_id, msg, update, context, edit_msg=None):
                 chat_history[chat_id].append((msg, msg_text[:300]))
                 return
 
-            if elapsed >= 180 and not notified:
+            if notify_idx < len(notify_times) and elapsed >= notify_times[notify_idx]:
                 status = f"Still working on your request... ({int(elapsed)}s)"
                 if edit_msg:
                     await edit_msg.edit_text(status)
                 else:
                     await update.message.reply_text(status)
-                notified = True
+                notify_idx += 1
 
             await context.bot.send_chat_action(chat_id=chat_id, action="typing")
     finally:
@@ -386,8 +493,8 @@ async def _execute_opencode(chat_id, msg, update, context, edit_msg=None):
                 pass
         _active_process.pop(chat_id, None)
 
-
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    _inc_counter()
     chat_id = update.effective_chat.id
     if not authorized(chat_id):
         return
@@ -420,8 +527,8 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     await _execute_opencode(chat_id, msg, update, context)
 
-
 async def handle_voice(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    _inc_counter()
     chat_id = update.effective_chat.id
     if not authorized(chat_id):
         return
@@ -447,13 +554,18 @@ async def handle_voice(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await status.edit_text("Could not transcribe that audio.")
             return
         await status.edit_text(f"Transcribed: _{text}_")
+
+        handler = _match_command(text)
+        if handler:
+            await handler(update, context)
+            return
+
         await _execute_opencode(chat_id, text, update, context, edit_msg=status)
     finally:
         try:
             os.remove(ogg_path)
         except OSError:
             pass
-
 
 def _sec_request(path):
     global _SEC_TLS_CTX
@@ -474,15 +586,31 @@ def _sec_request(path):
     except Exception as e:
         return f"Error: {e}"
 
+_MONITOR_SERVICE = "security-monitor.service"
+
+async def _ensure_monitor_running():
+    proc = await asyncio.create_subprocess_exec(
+        "systemctl", "is-active", _MONITOR_SERVICE,
+        stdout=asyncio.subprocess.PIPE,
+        stderr=asyncio.subprocess.DEVNULL
+    )
+    stdout, _ = await proc.communicate()
+    if stdout.decode().strip() != "active":
+        start = await asyncio.create_subprocess_exec(
+            "sudo", "systemctl", "start", _MONITOR_SERVICE,
+            stdout=asyncio.subprocess.DEVNULL,
+            stderr=asyncio.subprocess.DEVNULL
+        )
+        await start.wait()
 
 async def activatesecurity(update: Update, context: ContextTypes.DEFAULT_TYPE):
     chat_id = update.effective_chat.id
     if not authorized(chat_id):
         return
     msg = await update.message.reply_text("Activating security...")
+    await _ensure_monitor_running()
     result = _sec_request("/activate")
     await msg.edit_text(f"Security activated.\n{result}")
-
 
 async def deactivatesecurity(update: Update, context: ContextTypes.DEFAULT_TYPE):
     chat_id = update.effective_chat.id
@@ -491,7 +619,6 @@ async def deactivatesecurity(update: Update, context: ContextTypes.DEFAULT_TYPE)
     msg = await update.message.reply_text("Deactivating security...")
     result = _sec_request("/deactivate")
     await msg.edit_text(f"Security deactivated.\n{result}")
-
 
 async def pic(update: Update, context: ContextTypes.DEFAULT_TYPE):
     chat_id = update.effective_chat.id
@@ -566,7 +693,6 @@ async def pic(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 pass
             asyncio.create_task(_restart_security())
 
-
 async def _restart_security():
     await asyncio.sleep(3)
     try:
@@ -579,6 +705,80 @@ async def _restart_security():
     except Exception:
         pass
 
+def _parse_ssh_events(lines):
+    events = {}
+    for line in lines:
+        for pat, etype in _SSH_EVENT_PATTERNS:
+            m = pat.search(line)
+            if not m:
+                continue
+            if etype == 'ssh':
+                user, ip = m.groups()
+                events.setdefault('ssh', {}).setdefault(ip, set()).add(user)
+            else:
+                events[etype] = events.get(etype, 0) + 1
+            break
+    return events
+
+async def _send_ssh_alert(app, events):
+    lines = ['Suspicious Activity Detected']
+    if events.get('ssh'):
+        lines.append('')
+        lines.append('-- SSH --')
+        for ip, users in sorted(events['ssh'].items()):
+            ulist = ', '.join(sorted(users)[:5])
+            extra = f' ... +{len(users) - 5}' if len(users) > 5 else ''
+            count = 'attempt' if len(users) == 1 else 'attempts'
+            lines.append(f'* {len(users)} {count} from `{ip}`')
+            lines.append(f'  as {ulist}{extra}')
+    for key, label in [('sudo', 'sudo'), ('su', 'su'), ('new_user', 'new user')]:
+        c = events.get(key, 0)
+        if c:
+            lines.append('')
+            lines.append(f'-- {label} --')
+            lines.append(f'* {c} failure{"s" if c != 1 else ""}')
+    try:
+        await app.bot.send_message(
+            chat_id=ALLOWED_CHAT_ID, text='\n'.join(lines), parse_mode='Markdown'
+        )
+    except Exception as exc:
+        log_event(0, 'SSH_MONITOR_ERROR', f'send failed: {exc}')
+
+async def _ssh_monitor(app):
+    state = {'inode': 0, 'position': 0}
+    if os.path.exists(_SSH_MONITOR_STATE):
+        try:
+            with open(_SSH_MONITOR_STATE) as f:
+                state = json.load(f)
+        except Exception:
+            pass
+
+    while True:
+        try:
+            if not os.path.isfile(_SSH_MONITOR_LOG):
+                await asyncio.sleep(10)
+                continue
+
+            st = os.stat(_SSH_MONITOR_LOG)
+            ino, sz = st.st_ino, st.st_size
+
+            if ino != state.get('inode', 0) or sz < state.get('position', 0):
+                state.update(inode=ino, position=0)
+
+            if sz > state.get('position', 0):
+                with open(_SSH_MONITOR_LOG) as f:
+                    f.seek(state['position'])
+                    new_lines = f.readlines()
+                events = _parse_ssh_events(new_lines)
+                if events:
+                    await _send_ssh_alert(app, events)
+                state['position'] = sz
+
+            with open(_SSH_MONITOR_STATE, 'w') as f:
+                json.dump(state, f)
+        except Exception as exc:
+            log_event(0, 'SSH_MONITOR_ERROR', str(exc)[:500])
+        await asyncio.sleep(10)
 
 async def cancel(update: Update, context: ContextTypes.DEFAULT_TYPE):
     chat_id = update.effective_chat.id
@@ -594,7 +794,6 @@ async def cancel(update: Update, context: ContextTypes.DEFAULT_TYPE):
     else:
         await update.message.reply_text("Nothing to cancel.")
 
-
 async def securitystatus(update: Update, context: ContextTypes.DEFAULT_TYPE):
     chat_id = update.effective_chat.id
     if not authorized(chat_id):
@@ -607,6 +806,53 @@ async def securitystatus(update: Update, context: ContextTypes.DEFAULT_TYPE):
     except Exception:
         await update.message.reply_text(f"Security status:\n{result}")
 
+async def plan_mode(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    chat_id = update.effective_chat.id
+    if not authorized(chat_id):
+        return
+    chat_modes[chat_id] = "plan"
+    await update.message.reply_text(
+        "Plan Mode enabled.\n"
+        "I will present a plan and ask for your approval before executing anything."
+    )
+
+async def build_mode(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    chat_id = update.effective_chat.id
+    if not authorized(chat_id):
+        return
+    chat_modes[chat_id] = "build"
+    await update.message.reply_text(
+        "Build Mode enabled.\n"
+        "I will execute requested actions directly."
+    )
+
+async def show_mode(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    chat_id = update.effective_chat.id
+    if not authorized(chat_id):
+        return
+    mode = chat_modes.get(chat_id, "build")
+    label = "Plan" if mode == "plan" else "Build"
+    await update.message.reply_text(
+        f"Current mode: {label}\n"
+        f"Switch with /plan or /build."
+    )
+
+def _register_commands():
+    _register_command("start", start)
+    _register_command("docs", docs)
+    _register_command("persona", persona)
+    _register_command("reset", reset)
+    _register_command("logs", logs_cmd)
+    _register_command("pic", pic)
+    _register_command("cancel", cancel)
+    _register_command("plan", plan_mode)
+    _register_command("build", build_mode)
+    _register_command("mode", show_mode)
+    _register_command("activatesecurity", activatesecurity, "activate security", "arm security")
+    _register_command("deactivatesecurity", deactivatesecurity, "deactivate security", "disarm security")
+    _register_command("securitystatus", securitystatus, "security status")
+
+_register_commands()
 
 def _build_app():
     app = Application.builder().token(TOKEN).build()
@@ -615,26 +861,36 @@ def _build_app():
     app.add_handler(CommandHandler("persona", persona))
     app.add_handler(CommandHandler("reset", reset))
     app.add_handler(CommandHandler("logs", logs_cmd))
-    app.add_handler(CommandHandler("cancel", cancel))
     app.add_handler(CommandHandler("pic", pic))
     app.add_handler(CommandHandler("activatesecurity", activatesecurity))
     app.add_handler(CommandHandler("deactivatesecurity", deactivatesecurity))
+    app.add_handler(CommandHandler("cancel", cancel))
     app.add_handler(CommandHandler("securitystatus", securitystatus))
+    app.add_handler(CommandHandler("plan", plan_mode))
+    app.add_handler(CommandHandler("build", build_mode))
+    app.add_handler(CommandHandler("mode", show_mode))
     app.add_handler(MessageHandler(filters.VOICE | filters.AUDIO, handle_voice))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
     return app
 
+async def _run_with_monitor(app):
+    async with app:
+        await app.start()
+        await app.updater.start_polling(allowed_updates=Update.ALL_TYPES)
+        monitor = asyncio.create_task(_ssh_monitor(app))
+        try:
+            await asyncio.Event().wait()
+        finally:
+            monitor.cancel()
+            try:
+                await monitor
+            except asyncio.CancelledError:
+                pass
 
 def main():
     print("Bot starting...")
-    while True:
-        try:
-            app = _build_app()
-            app.run_polling(allowed_updates=Update.ALL_TYPES)
-        except Exception as exc:
-            print(f"Polling error: {exc}. Restarting in 5s...")
-            time.sleep(5)
-
+    app = _build_app()
+    asyncio.run(_run_with_monitor(app))
 
 if __name__ == "__main__":
     main()

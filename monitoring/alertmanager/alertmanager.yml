@@ -1,0 +1,8 @@
+route:
+  receiver: telegram
+  repeat_interval: 4h
+
+receivers:
+  - name: telegram
+    webhook_configs:
+      - url: http://127.0.0.1:9095

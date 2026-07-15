@@ -6,6 +6,19 @@ from alert import send_alert
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 STATE_FILE = BASE_DIR + '/.state'
 PID_FILE = BASE_DIR + '/.monitor_pid'
+MOTION_COUNTER = BASE_DIR + '/.motion_counter'
+
+def _inc_motion_counter():
+    c = 0
+    try:
+        if os.path.exists(MOTION_COUNTER):
+            with open(MOTION_COUNTER) as f:
+                c = int(f.read().strip() or '0')
+        c += 1
+        with open(MOTION_COUNTER, 'w') as f:
+            f.write(str(c))
+    except Exception:
+        pass
 
 def acquire_pid_lock():
     if os.path.exists(PID_FILE):
@@ -247,6 +260,7 @@ class SecurityMonitor:
                 video_path = self.record_clip(ts_raw)
                 msg = f"Motion detected at {ts_display} (intensity: {int(motion)})"
                 print(f">>> {msg}")
+                _inc_motion_counter()
                 send_alert(msg, image_path=img_path, video_path=video_path)
 
         if self.cap is not None:

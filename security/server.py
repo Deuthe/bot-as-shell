@@ -13,7 +13,17 @@ KEY_FILE = CERTS + '/key.pem'
 
 from config import load_dotenv
 load_dotenv()
-PASSWORD = os.environ.get('SECURITY_PW', '')
+
+def _read_cred(name):
+    cred_dir = os.environ.get('CREDENTIALS_DIRECTORY')
+    if cred_dir:
+        path = os.path.join(cred_dir, name)
+        if os.path.isfile(path):
+            with open(path) as f:
+                return f.read().strip()
+    return None
+
+PASSWORD = _read_cred('security-pw') or os.environ.get('SECURITY_PW', '')
 if not PASSWORD:
     print("FATAL: SECURITY_PW not set in environment or .env")
     sys.exit(1)
@@ -42,21 +52,42 @@ class Handler(BaseHTTPRequestHandler):
         _rate_buckets[ip].append(now)
         return False
 
+    def _send_security_headers(self):
+        self.send_header('X-Content-Type-Options', 'nosniff')
+        self.send_header('X-Frame-Options', 'DENY')
+        self.send_header('X-XSS-Protection', '0')
+
     def _auth_required(self):
         if self._rate_limited():
             self.send_response(429)
+            self._send_security_headers()
             self.send_header('Content-Type', 'text/plain')
             self.end_headers()
             self.wfile.write(b'Rate limited. Try again later.\n')
             return False
         if not check_auth(self.headers):
             self.send_response(401)
+            self._send_security_headers()
             self.send_header('WWW-Authenticate', 'Basic realm="Security"')
             self.send_header('Content-Type', 'text/plain')
             self.end_headers()
             self.wfile.write(b'Authorization required\n')
             return False
         return True
+
+    def _ensure_monitor(self):
+        try:
+            r = subprocess.run(
+                ["systemctl", "is-active", "security-monitor.service"],
+                capture_output=True, timeout=5
+            )
+            if r.stdout.decode().strip() != "active":
+                subprocess.run(
+                    ["sudo", "systemctl", "start", "security-monitor.service"],
+                    capture_output=True, timeout=10
+                )
+        except Exception:
+            pass
 
     def _run(self, action):
         try:
@@ -72,6 +103,7 @@ class Handler(BaseHTTPRequestHandler):
             return
         path = self.path.lower().rstrip('/')
         if path in ('/activate', '/activatesecurity'):
+            self._ensure_monitor()
             code, msg = self._run('activate')
         elif path in ('/deactivate', '/deactivatesecurity'):
             code, msg = self._run('deactivate')
@@ -79,15 +111,14 @@ class Handler(BaseHTTPRequestHandler):
             code, msg = self._run('status')
         else:
             self.send_response(404)
+            self._send_security_headers()
             self.send_header('Content-Type', 'text/plain')
             self.end_headers()
             self.wfile.write(b'Use /activate, /deactivate, or /status\n')
             return
         self.send_response(code)
+        self._send_security_headers()
         self.send_header('Content-Type', 'text/plain')
-        self.send_header('X-Content-Type-Options', 'nosniff')
-        self.send_header('X-Frame-Options', 'DENY')
-        self.send_header('X-XSS-Protection', '0')
         self.end_headers()
         self.wfile.write(msg.encode())
 
